@@ -1,0 +1,6 @@
+dataset,condition,method,accuracy,accuracy,purity,purity
+,,,mean,std,mean,std
+split_cifar10,sym20,arc_full,0.5096,,0.8171428571428572,
+split_cifar10,sym20,arc_lite,0.5267,,0.7933884297520661,
+split_cifar10,sym60,arc_full,0.5006,,0.3211920529801324,
+split_cifar10,sym60,arc_lite,0.4704,,0.3312302839116719,

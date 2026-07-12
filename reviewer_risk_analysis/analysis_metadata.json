@@ -1,0 +1,16 @@
+{
+  "source": "results\\neural_networks_submission\\csv\\final_metrics.csv",
+  "seed": 20260712,
+  "bootstrap_reps": 10000,
+  "bootstrap_unit": {
+    "leave_one_condition_out": "held-out condition fold",
+    "leave_one_benchmark_out": "held-out benchmark-family fold"
+  },
+  "bootstrap_method": "sample already-valid held-out fold rows with replacement and average fold metrics; no cross-validation refitting inside bootstrap replicates",
+  "threshold_estimation": "training folds only in the unchanged leave-one-group-out point-estimate procedure",
+  "target": "average_accuracy(gate) > seed-matched average_accuracy(ER)",
+  "included": "non-oracle runs with nonmissing gate separation",
+  "n": 530,
+  "conditions": 26,
+  "benchmarks": 6
+}

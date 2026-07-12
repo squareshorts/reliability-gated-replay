@@ -1,0 +1,30 @@
+{
+  "data": {
+    "name": "permuted_mnist",
+    "source": "mnist",
+    "multihead": false,
+    "n_tasks": 5,
+    "max_train_per_task": 100,
+    "val_fraction": 0.1,
+    "allow_download": true,
+    "fallback_synthetic": true,
+    "seed": 0,
+    "label_noise": {
+      "rate": 0.2,
+      "schedule": "all",
+      "noise_type": "symmetric"
+    }
+  },
+  "method": {
+    "name": "arc_full",
+    "buffer_size": 500,
+    "batch_size": 32,
+    "teacher_momentum": 0.999,
+    "adaptive_ema": 0.95,
+    "seed": 0
+  },
+  "train": {
+    "epochs": 8,
+    "batch_size": 128
+  }
+}

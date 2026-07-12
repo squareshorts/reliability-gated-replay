@@ -1,0 +1,6 @@
+metric,ci_low,ci_high,scheme
+roc_auc,0.6888192873956857,0.8480558144770608,leave_one_condition_out
+balanced_accuracy,0.566597256909757,0.7021449584888683,leave_one_condition_out
+sensitivity,0.4872913490672442,0.7713387076478507,leave_one_condition_out
+specificity,0.4907051282051282,0.7650331959706959,leave_one_condition_out
+ppv,0.6564327626396592,0.806852750329603,leave_one_condition_out
