@@ -1,38 +1,54 @@
-# Final execution status
+﻿# Final revision-round execution status
 
-## Required frozen cells
+## Frozen ledger
 
-| Phase | Frozen required cells | Completed |
-|---|---:|---:|
-| Phase 2 scoring | 120 | 120/120 |
-| Phase 3 persistence | 200 | 200/200 |
-| Phase 4 recipe sensitivity | 100 | 100/100 |
-| **Required total** | **420** | **420/420** |
+The frozen revision-round ledger contains 427 cells.
 
-- Required frozen cells executed: **420/420**
-- Failed required cells: **0**
+| Phase | Status | Cells |
+|---|---|---:|
+| Phase 2 — scoring | Completed | 120/120 |
+| Phase 3 — persistence | Completed | 200/200 |
+| Phase 4 — recipe sensitivity | Completed | 100/100 |
+| Required frozen cells | Completed | 420/420 |
+| Phase 8 — Mammoth ER bridge | Conditional — not triggered | 7 |
+| Failed required cells | None | 0 |
 
-## Conditional Phase 8 Mammoth ER cells
+## Required execution
 
-The frozen ledger contains seven explicitly conditional P8 Mammoth ER cells:
+All 420 non-conditional frozen cells were executed successfully.
 
-- `P8__mammoth_seq_cifar10__sym20__er__s0`
-- `P8__mammoth_seq_cifar10__sym20__er__s1`
-- `P8__mammoth_seq_cifar10__sym20__er__s2`
-- `P8__mammoth_seq_cifar10__asym40__er__s0`
-- `P8__mammoth_seq_cifar10__asym40__er__s1`
-- `P8__mammoth_seq_cifar10__asym40__er__s2`
-- `P8__mammoth_seq_cifar10__sym60__er__s2`
+No required frozen cell remains missing or failed.
 
-The trigger condition was not satisfied because the required pinned Mammoth checkout (`pinned_mammoth_e75a491c`) and matched raw AER provenance are unavailable locally. Under the frozen ledger rule `conditional_only_if_existing_AER_provenance_can_be_matched`, all seven are:
+## Conditional Mammoth ER bridge
 
-**CONDITIONAL — NOT TRIGGERED**
+The frozen ledger contains seven Phase-8 Mammoth ER bridge cells:
 
-They are not missing, failed, or incomplete required runs.
+1. P8__mammoth_seq_cifar10__sym20__er__s0
+2. P8__mammoth_seq_cifar10__sym20__er__s1
+3. P8__mammoth_seq_cifar10__sym20__er__s2
+4. P8__mammoth_seq_cifar10__asym40__er__s0
+5. P8__mammoth_seq_cifar10__asym40__er__s1
+6. P8__mammoth_seq_cifar10__asym40__er__s2
+7. P8__mammoth_seq_cifar10__sym60__er__s2
 
-## Final ledger
+These cells were explicitly conditional on establishing a matched Mammoth
+AER-versus-ER bridge with the required pinned implementation and recoverable
+AER provenance.
 
-- Total frozen cells: **427**
-- Required executed: **420**
-- Conditional not triggered: **7**
-- Failed required: **0**
+That trigger condition was not satisfied. The required pinned Mammoth source
+checkout and matched raw AER provenance are unavailable locally. Executing new
+ER cells without that matched provenance would not establish the intended
+within-harness comparison.
+
+The seven Phase-8 cells are therefore classified as:
+
+CONDITIONAL — NOT TRIGGERED
+
+They are not classified as missing, failed, or incomplete required runs.
+
+## Final status
+
+- Total frozen ledger: 427 cells
+- Required cells executed: 420/420
+- Conditional cells not triggered: 7
+- Failed required cells: 0
