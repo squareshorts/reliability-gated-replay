@@ -70,6 +70,10 @@ class ContinualMethod:
         """Runs after ``backward()`` and before ``optimizer.step()``."""
         ...
 
+    def before_update(self, model: nn.Module, x: torch.Tensor, y: torch.Tensor, task_id: int) -> None:
+        """Runs immediately before optimizer.step(), used for pre-update scoring."""
+        ...
+
     def on_batch_end(
         self, model: nn.Module, x: torch.Tensor, y: torch.Tensor, task_id: int
     ) -> None:

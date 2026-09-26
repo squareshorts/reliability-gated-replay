@@ -44,7 +44,11 @@ def build_optimizer(model: nn.Module, cfg: Dict[str, Any]) -> torch.optim.Optimi
         return torch.optim.Adam(params, lr=lr, weight_decay=wd)
     if name == "sgd":
         return torch.optim.SGD(
-            params, lr=lr, momentum=float(cfg.get("momentum", 0.0)), weight_decay=wd
+            params,
+            lr=lr,
+            momentum=float(cfg.get("momentum", 0.0)),
+            weight_decay=wd,
+            nesterov=bool(cfg.get("nesterov", False)),
         )
     raise KeyError(f"Unknown optimizer '{name}'. Known: adam, sgd")
 
@@ -57,6 +61,7 @@ def evaluate(
     device: torch.device,
     batch_size: int = 256,
     valid_classes: List[int] | None = None,
+    input_transform=None,
 ) -> Dict[str, float]:
     """Return {'acc','loss','masked_acc'} for ``dataset`` using head ``task_id``."""
     model.eval()
@@ -64,6 +69,8 @@ def evaluate(
     total, correct, loss_sum = 0, 0, 0.0
     correct_masked = 0
     for x, y in loader:
+        if input_transform is not None:
+            x = input_transform(x)
         x, y = x.to(device), y.to(device)
         out = model(x, task_id)
         loss_sum += F.cross_entropy(out, y, reduction="sum").item()

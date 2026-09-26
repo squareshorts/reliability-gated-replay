@@ -44,3 +44,13 @@ AGENTS.md
 pasted-text*.txt
 *.prompt
 *.chat
+
+# Revision-round local smoke, pytest, and launcher artifacts.
+.pytest_tmp/
+results/neural_networks_submission/_smoke/
+revision_round1/logs/
+revision_round1/results/baseline_cifar_smoke/
+revision_round1/results/baseline_cifar_fullcap_smoke/
+revision_round1/tests/pytest_baseline_tmp/
+results/revision_round1/tranche10_r1/launcher_*.log
+run_remaining_r1.ps1

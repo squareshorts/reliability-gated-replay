@@ -35,6 +35,7 @@ def _registry() -> "Dict[str, Type[ContinualMethod]]":
         from baselines.si import SI
         from baselines.arc_replay import ARCLite, ARCFull
         from baselines.irgr import IRGR
+        from .persistence_common_history import PersistenceCommonHistory
 
         from .pnn.method import PNNMethod
 
@@ -58,6 +59,7 @@ def _registry() -> "Dict[str, Type[ContinualMethod]]":
             "arc_lite": ARCLite,
             "arc_full": ARCFull,
             "irgr": IRGR,
+            "persistence_common_history": PersistenceCommonHistory,
         }
     return _REGISTRY_CACHE
 

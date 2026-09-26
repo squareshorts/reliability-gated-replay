@@ -21,6 +21,7 @@ from datasets.base import ContinualBenchmark
 from utils.logging import get_logger
 
 from .base import ContinualMethod
+from .r1_recipe import R1Cifar10Views, R1_OPTIMIZER, R1_RECIPE_ID, R1_SCHEDULER, R1_TRAIN
 from .utils import build_optimizer, evaluate, protected_named_parameters
 
 # stable per-example uid = task offset + within-task index (keeps the
@@ -65,6 +66,24 @@ class ContinualTrainer:
         self.eval_batch_size = int(tcfg.get("eval_batch_size", 256))
         self.probe_size = int(tcfg.get("probe_size", 200))
         self.grad_clip = tcfg.get("grad_clip")
+        self.max_tasks = min(len(self.bench.tasks), int(tcfg.get("max_tasks", len(self.bench.tasks))))
+        if self.max_tasks < 1:
+            raise ValueError("train.max_tasks must be at least 1")
+        self.optimizer = None
+        self.scheduler = None
+        self.recipe = str(cfg.get("recipe", "R0"))
+        if self.recipe not in {"R0", R1_RECIPE_ID}:
+            raise ValueError(f"Unknown training recipe '{self.recipe}'")
+        self.r1_views = None
+        if self.recipe == R1_RECIPE_ID:
+            self._validate_r1_configuration()
+            self.r1_views = R1Cifar10Views(int(tcfg.get("seed", cfg.get("seed", 0))))
+            # The planned R1 methods are replay/gated replay.  These optional
+            # setters keep the legacy method interface and R0 path unchanged.
+            if hasattr(self.method, "set_replay_input_transform"):
+                self.method.set_replay_input_transform(self.r1_views.training_view)
+            if hasattr(self.method, "set_gate_input_transform"):
+                self.method.set_gate_input_transform(self.r1_views.score_eval_view)
 
         # snapshot init weights by name (params may later be frozen, e.g. prog_freeze)
         self._init_named = {
@@ -74,7 +93,42 @@ class ContinualTrainer:
 
     def _build_probe(self) -> torch.Tensor:
         x, _ = self.bench.tasks[0].test.tensors
-        return x[: self.probe_size].to(self.device)
+        x = x[: self.probe_size]
+        if self.r1_views is not None:
+            x = self.r1_views.score_eval_view(x)
+        return x.to(self.device)
+
+    def _validate_r1_configuration(self) -> None:
+        """Reject accidental R1 overrides instead of silently changing the recipe."""
+        optimizer_cfg = self.cfg.get("optimizer", {})
+        expected_optimizer = R1_OPTIMIZER
+        for key, expected in expected_optimizer.items():
+            actual = optimizer_cfg.get(key)
+            if actual != expected:
+                raise ValueError(
+                    f"R1 requires optimizer.{key}={expected!r}, got {actual!r}"
+                )
+        if self.max_epochs != int(R1_TRAIN["epochs"]):
+            raise ValueError(f"R1 requires {R1_TRAIN['epochs']} epochs per task")
+        if self.batch_size != int(R1_TRAIN["batch_size"]):
+            raise ValueError(f"R1 requires current batch={R1_TRAIN['batch_size']}")
+
+    def _build_optimizer_and_scheduler(self):
+        optimizer = build_optimizer(self.model, self.cfg.get("optimizer", {}))
+        if self.recipe != R1_RECIPE_ID:
+            return optimizer, None
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=int(R1_SCHEDULER["t_max"]),
+            eta_min=float(R1_SCHEDULER["eta_min"]),
+        )
+        return optimizer, scheduler
+
+    def _score_eval_view(self, x: torch.Tensor) -> torch.Tensor:
+        return self.r1_views.score_eval_view(x) if self.r1_views is not None else x
+
+    def _training_view(self, x: torch.Tensor, task_id: int) -> torch.Tensor:
+        return self.r1_views.training_view(x, task_id) if self.r1_views is not None else x
 
     @torch.no_grad()
     def _probe_features(self) -> List[List[float]]:
@@ -93,7 +147,15 @@ class ContinualTrainer:
 
     def _eval_all(self) -> Dict[str, List[float]]:
         res = [
-            evaluate(self.model, t.test, t.task_id, self.device, self.eval_batch_size, t.global_classes)
+            evaluate(
+                self.model,
+                t.test,
+                t.task_id,
+                self.device,
+                self.eval_batch_size,
+                t.global_classes,
+                input_transform=self._score_eval_view if self.r1_views is not None else None,
+            )
             for t in self.bench.tasks
         ]
         out = {"acc": [r["acc"] for r in res]}
@@ -116,11 +178,28 @@ class ContinualTrainer:
         consolidation: List[Dict[str, Any]] = []
         representations: List[List[List[float]]] = []
         timing: List[float] = []
+        optimizer_steps: List[int] = []
+        scheduler_steps: List[int] = []
+        optimizer_task_metadata: List[Dict[str, Any]] = []
 
         t_start = time.time()
-        for tid, task in enumerate(self.bench.tasks):
+        for tid, task in enumerate(self.bench.tasks[: self.max_tasks]):
             self.method.on_task_start(tid, self.model)
-            optimizer = build_optimizer(self.model, self.cfg.get("optimizer", {}))
+            optimizer, scheduler = self._build_optimizer_and_scheduler()
+            self.optimizer = optimizer
+            self.scheduler = scheduler
+            if self.recipe == R1_RECIPE_ID:
+                optimizer_task_metadata.append(
+                    {
+                        "task_id": tid,
+                        "optimizer": type(optimizer).__name__,
+                        "initial_lr": float(optimizer.param_groups[0]["lr"]),
+                        "initial_state_entries": len(optimizer.state),
+                        "scheduler": type(scheduler).__name__ if scheduler is not None else None,
+                        "scheduler_t_max": int(R1_SCHEDULER["t_max"]),
+                        "scheduler_eta_min": float(R1_SCHEDULER["eta_min"]),
+                    }
+                )
             train_loader = DataLoader(
                 _IndexedDataset(task.train), batch_size=self.batch_size, shuffle=True
             )
@@ -129,11 +208,14 @@ class ContinualTrainer:
             hist: List[Dict[str, Any]] = []
             task_t0 = time.time()
             gnorm_acc, gnorm_n = 0.0, 0
+            task_optimizer_steps = 0
+            task_scheduler_steps = 0
             for epoch in range(self.max_epochs):
                 self.model.train()
                 ep_loss, ep_n = 0.0, 0
                 for x, y, idx in train_loader:
-                    x, y = x.to(self.device), y.to(self.device)
+                    canonical_x, y = x.to(self.device), y.to(self.device)
+                    train_x = self._training_view(canonical_x, tid)
                     uids = (tid * _UID_TASK_STRIDE + idx).to(self.device)
                     y_clean = (
                         torch.as_tensor(y_clean_np[idx.numpy()], dtype=torch.long).to(self.device)
@@ -142,23 +224,36 @@ class ContinualTrainer:
                     )
                     self.method.observe_batch(tid, uids, y_clean)
                     optimizer.zero_grad()
-                    out = self.model(x, tid)
-                    loss = self.method.main_loss(self.model, out, x, y, tid)
+                    out = self.model(train_x, tid)
+                    loss = self.method.main_loss(self.model, out, train_x, y, tid)
                     if loss is None:  # default: standard current-batch cross-entropy
                         loss = F.cross_entropy(out, y)
-                    total = loss + self.method.extra_loss(self.model, x, y, tid)
+                    total = loss + self.method.extra_loss(self.model, train_x, y, tid)
                     total.backward()
                     gnorm_acc += self._grad_norm()
                     gnorm_n += 1
                     self.method.modify_gradients(self.model)
                     if self.grad_clip:
                         nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                    # R1 gates score the canonical normalization-only view via
+                    # their R1 transform hook; the same canonical data is stored.
+                    hook_x = canonical_x if self.r1_views is not None else train_x
+                    self.method.before_update(self.model, hook_x, y, tid)
                     optimizer.step()
-                    self.method.on_batch_end(self.model, x, y, tid)
+                    task_optimizer_steps += 1
+                    self.method.on_batch_end(self.model, hook_x, y, tid)
                     ep_loss += loss.item() * y.numel()
                     ep_n += y.numel()
 
-                val = evaluate(self.model, task.val, tid, self.device, self.eval_batch_size, task.global_classes)
+                val = evaluate(
+                    self.model,
+                    task.val,
+                    tid,
+                    self.device,
+                    self.eval_batch_size,
+                    task.global_classes,
+                    input_transform=self._score_eval_view if self.r1_views is not None else None,
+                )
                 rec = {
                     "epoch": epoch,
                     "train_loss": ep_loss / max(ep_n, 1),
@@ -168,6 +263,9 @@ class ContinualTrainer:
                 if "masked_acc" in val:
                     rec["val_masked_acc"] = val["masked_acc"]
                 stop = self.method.on_epoch_end(self.model, val, epoch)
+                if scheduler is not None:
+                    scheduler.step()
+                    task_scheduler_steps += 1
                 if self.method.history:
                     rec.update(self.method.history[-1])  # latest method signals
                 hist.append(rec)
@@ -183,6 +281,8 @@ class ContinualTrainer:
             self.method.offline_phase(self.model, tid)
 
             timing.append(time.time() - task_t0)
+            optimizer_steps.append(task_optimizer_steps)
+            scheduler_steps.append(task_scheduler_steps)
             grad_norms.append(gnorm_acc / max(gnorm_n, 1))
             weight_drift.append(self._weight_drift())
             consolidation.append(self.method.consolidation_state(self.model))
@@ -204,8 +304,9 @@ class ContinualTrainer:
         )
         n_params = sum(p.numel() for p in self.model.parameters())
 
-        return {
+        result = {
             "n_tasks": T,
+            "trained_n_tasks": self.max_tasks,
             "task_names": [t.name for t in self.bench.tasks],
             "n_classes_per_task": self.bench.n_classes_per_task,
             "init_acc": init_acc,
@@ -222,6 +323,34 @@ class ContinualTrainer:
             "n_params": n_params,
             "inference_cost_us_per_sample": self._inference_cost(),
         }
+        if self.recipe == R1_RECIPE_ID:
+            acquisition = [float(R[i][i]) for i in range(len(R))]
+            final_retention = list(R[-1]) if R else []
+            result.update(
+                {
+                    "recipe": R1_RECIPE_ID,
+                    "optimization_steps": {
+                        "per_task": optimizer_steps,
+                        "total": int(sum(optimizer_steps)),
+                    },
+                    "r1_training": {
+                        "optimizer_reset_at_task_boundary": True,
+                        "scheduler_reset_at_task_boundary": True,
+                        "scheduler_steps_per_task": scheduler_steps,
+                        "scheduler_step_timing": R1_SCHEDULER["step_timing"],
+                        "optimizer_task_metadata": optimizer_task_metadata,
+                        "augmentation_rng": self.r1_views.provenance(),
+                        "canonical_buffer_storage": True,
+                        "gate_eval_view": "normalization_only",
+                    },
+                    "clean_data_acquisition_retention": {
+                        "accuracy_matrix": R,
+                        "acquisition_diagonal": acquisition,
+                        "final_retention_row": final_retention,
+                    },
+                }
+            )
+        return result
 
     def _grad_norm(self) -> float:
         sq = 0.0

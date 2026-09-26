@@ -43,6 +43,9 @@ class GatedReplay(ContinualMethod):
         seed = int(self.cfg.get("seed", 0))
         self.buf = ReplayBuffer(int(self.cfg.get("buffer_size", 500)), seed=seed)
         self.replay_n = int(self.cfg.get("replay_n", self.cfg.get("batch_size", 32)))
+        self.replay_loss_coefficient = float(self.cfg.get("replay_loss_coefficient", 1.0))
+        self._replay_input_transform = None
+        self._gate_input_transform = None
         # gating on/off. ``error_gated: false`` -> plain replay (admit everything).
         gate_cfg = dict(self.cfg.get("gate", {}))
         # back-compat: the legacy error gate was configured at top level.
@@ -51,6 +54,11 @@ class GatedReplay(ContinualMethod):
         gate_cfg.setdefault("gamma", self.cfg.get("error_gamma", gate_cfg.get("gamma", 5.0)))
         self.gated = bool(self.cfg.get("error_gated", True)) and gate_cfg["signal"] != "none"
         self.level = str(self.cfg.get("gate_level", gate_cfg.get("level", "sample")))
+        self.scoring_mode = str(self.cfg.get("scoring_mode", "post_update"))
+        if self.scoring_mode not in {"post_update", "pre_update"}:
+            raise ValueError(f"scoring_mode must be post_update or pre_update, got {self.scoring_mode}")
+        self._cached_pre_update_g = None
+        self._cached_pre_update_correct = None
         self.gate = ReliabilityGate(gate_cfg) if self.gated else None
         # Reviewer controls. ``fixed_admission_prob`` is a random gate whose
         # admission rate is supplied from a paired realizable-gate run.
@@ -111,6 +119,14 @@ class GatedReplay(ContinualMethod):
         self._task_candidates = 0
         self._task_admitted = 0
         self._cur_task = 0
+
+    def set_replay_input_transform(self, transform) -> None:
+        """Install the R1 replay-training view without changing membership."""
+        self._replay_input_transform = transform
+
+    def set_gate_input_transform(self, transform) -> None:
+        """Install the R1 normalization-only admission-score view."""
+        self._gate_input_transform = transform
 
     def on_task_start(self, task_id, model):
         self._device = next(model.parameters()).device
@@ -175,39 +191,25 @@ class GatedReplay(ContinualMethod):
     def extra_loss(self, model, x, y, task_id):
         if len(self.buf) == 0:
             return x.new_zeros(())
-        return replay_ce_loss(model, self.buf.sample(self.replay_n), self._device)
+        replay = replay_ce_loss(
+            model,
+            self.buf.sample(self.replay_n),
+            self._device,
+            input_transform=self._replay_input_transform,
+        )
+        return self.replay_loss_coefficient * replay
 
-    def on_batch_end(self, model, x, y, task_id):
+    def before_update(self, model, x, y, task_id):
+        if self.gated and self.scoring_mode == "pre_update" and self.fixed_admission_prob is None and not self.oracle:
+            g, correct = self._compute_score(model, x, y, task_id)
+            self._cached_pre_update_g = g
+            self._cached_pre_update_correct = correct
+
+    def _compute_score(self, model, x, y, task_id):
+        if self._gate_input_transform is not None:
+            x = self._gate_input_transform(x)
         y_clean = self._batch_y_clean if self._batch_y_clean is not None else y
         correct = (y.detach().cpu() == y_clean.detach().cpu()).long()
-        self._task_candidates += int(x.shape[0])
-        if self.oracle:  # clean-only oracle, optionally thinned to a matched rate
-            clean = (y == y_clean).detach().cpu()
-            keep = torch.rand(x.shape[0], generator=self._rng) < self.oracle_keep_prob
-            mask = clean & keep
-            g = clean.float() * self.oracle_keep_prob
-            self._task_g.extend(g.detach().cpu().tolist())
-            self._task_correct.extend(correct.tolist())
-            if bool(mask.any()):
-                md = mask.to(x.device)
-                self.buf.add(x[md], y[md], task_id, y_clean=y_clean[md])
-                self._task_admitted += int(mask.sum())
-            return
-        if self.fixed_admission_prob is not None:
-            p = self.fixed_admission_prob
-            g = torch.full((x.shape[0],), p)
-            self._task_g.extend(g.tolist())
-            self._task_correct.extend(correct.tolist())
-            mask = torch.rand(x.shape[0], generator=self._rng) < p
-            if bool(mask.any()):
-                md = mask.to(x.device)
-                self.buf.add(x[md], y[md], task_id, y_clean=y_clean[md])
-                self._task_admitted += int(mask.sum())
-            return
-        if not self.gated:
-            self.buf.add(x, y, task_id, y_clean=y_clean)
-            self._task_admitted += int(x.shape[0])
-            return
         # advance per-task step; take the early snapshot once (Route 1)
         self._task_step += 1
         if self.early_enabled and self.early_scorer is None and self._task_step >= self.early_after:
@@ -241,6 +243,50 @@ class GatedReplay(ContinualMethod):
             else:
                 scorer = model
             g, diag = self.gate.score(scorer, x, y, task_id, uids=self._batch_uids)
+        return g, correct
+
+    def on_batch_end(self, model, x, y, task_id):
+        y_clean = self._batch_y_clean if self._batch_y_clean is not None else y
+        correct = (y.detach().cpu() == y_clean.detach().cpu()).long()
+        self._task_candidates += int(x.shape[0])
+        if self.oracle:  # clean-only oracle, optionally thinned to a matched rate
+            clean = (y == y_clean).detach().cpu()
+            keep = torch.rand(x.shape[0], generator=self._rng) < self.oracle_keep_prob
+            mask = clean & keep
+            g = clean.float() * self.oracle_keep_prob
+            self._task_g.extend(g.detach().cpu().tolist())
+            self._task_correct.extend(correct.tolist())
+            if bool(mask.any()):
+                md = mask.to(x.device)
+                self.buf.add(x[md], y[md], task_id, y_clean=y_clean[md])
+                self._task_admitted += int(mask.sum())
+            return
+        if self.fixed_admission_prob is not None:
+            p = self.fixed_admission_prob
+            g = torch.full((x.shape[0],), p)
+            self._task_g.extend(g.tolist())
+            self._task_correct.extend(correct.tolist())
+            mask = torch.rand(x.shape[0], generator=self._rng) < p
+            if bool(mask.any()):
+                md = mask.to(x.device)
+                self.buf.add(x[md], y[md], task_id, y_clean=y_clean[md])
+                self._task_admitted += int(mask.sum())
+            return
+        if not self.gated:
+            self.buf.add(x, y, task_id, y_clean=y_clean)
+            self._task_admitted += int(x.shape[0])
+            return
+
+        if self.scoring_mode == "pre_update":
+            if self._cached_pre_update_g is None or self._cached_pre_update_correct is None:
+                raise RuntimeError("pre_update scoring cache is missing")
+            g = self._cached_pre_update_g
+            correct = self._cached_pre_update_correct
+            self._cached_pre_update_g = None
+            self._cached_pre_update_correct = None
+        else:
+            g, correct = self._compute_score(model, x, y, task_id)
+
         # record gate vs. true-label correctness for this batch (correctness =
         # stored training label equals the true label).
         self._task_g.extend(g.cpu().tolist())
@@ -292,6 +338,8 @@ class GatedReplay(ContinualMethod):
             "buffer_size": len(self.buf),
             "buffer_purity": self.buf.purity(),
             "gate_signal": (self.gate.signal if self.gate else "none"),
+            "scoring_mode": self.scoring_mode,
+            "replay_loss_coefficient": self.replay_loss_coefficient,
             "fixed_admission_prob": self.fixed_admission_prob,
             "oracle_keep_prob": self.oracle_keep_prob if self.oracle else None,
             "teacher_enabled": self.teacher_enabled,

@@ -20,6 +20,10 @@ class ReplayBuffer:
         self.y: List[int] = []           # stored (possibly noisy) label -- rehearsed
         self.yc: List[int] = []          # true label (for purity audit only)
         self.t: List[int] = []
+        # Stable example IDs are optional for legacy callers. Persistence
+        # common-history artifacts pass them explicitly so final reservoir
+        # membership can be audited without changing reservoir mechanics.
+        self.stable_ids: List[int | None] = []
         self._seen = 0
         self._rng = torch.Generator().manual_seed(seed)
 
@@ -29,22 +33,29 @@ class ReplayBuffer:
         y: torch.Tensor,
         task_id: int,
         y_clean: torch.Tensor | None = None,
+        stable_ids: torch.Tensor | None = None,
     ) -> None:
         x = x.detach().cpu()
         y = y.detach().cpu()
         yc = y if y_clean is None else y_clean.detach().cpu()
+        ids = None if stable_ids is None else stable_ids.detach().cpu()
+        if ids is not None and ids.shape[0] != x.shape[0]:
+            raise ValueError("stable_ids must have one entry per admitted example")
         for i in range(x.shape[0]):
             self._seen += 1
+            stable_id = None if ids is None else int(ids[i])
             if len(self.x) < self.capacity:
                 self.x.append(x[i])
                 self.y.append(int(y[i]))
                 self.yc.append(int(yc[i]))
                 self.t.append(task_id)
+                self.stable_ids.append(stable_id)
             else:
                 j = int(torch.randint(0, self._seen, (1,), generator=self._rng).item())
                 if j < self.capacity:
                     self.x[j], self.y[j], self.t[j] = x[i], int(y[i]), task_id
                     self.yc[j] = int(yc[i])
+                    self.stable_ids[j] = stable_id
 
     def __len__(self) -> int:
         return len(self.x)
@@ -104,7 +115,7 @@ class WeightedReplayBuffer(ReplayBuffer):
         return [(self.x[i], self.y[i], self.t[i], self.w[i]) for i in idx]
 
 
-def replay_ce_loss(model, samples, device) -> torch.Tensor:
+def replay_ce_loss(model, samples, device, input_transform=None) -> torch.Tensor:
     """Mean cross-entropy over replayed (x, y, task) samples, grouped by head."""
     if not samples:
         return next(model.parameters()).new_zeros(())
@@ -117,6 +128,8 @@ def replay_ce_loss(model, samples, device) -> torch.Tensor:
     count = 0
     for t, (xs, ys) in by_task.items():
         xb = torch.stack(xs).to(device)
+        if input_transform is not None:
+            xb = input_transform(xb, int(t))
         yb = torch.tensor(ys, dtype=torch.long, device=device)
         out = model(xb, t)
         total = total + F.cross_entropy(out, yb, reduction="sum")
