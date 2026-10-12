@@ -21,14 +21,17 @@ submitted to *Neural Networks*.
 - `results/projected_taskil_cifar10n/`: projected task-IL CIFAR-10N configs and
   compact Part-A artifacts.
 - `results/paired_uncertainty/`: seed-paired CIFAR uncertainty artifacts.
-- `paper/`: manuscript source, bibliography, and publication figures.
+- `revision_round1/`: frozen reviewer-round protocols, analysis scripts, and validated analysis tables.
 - `patches/`: pinned patch bundle for the optional external Mammoth/AER baseline.
 - `tests/`: unit and end-to-end tests.
-- `evidence/`: portable SHA-256 manifest for the separately archived raw results.
+- `evidence/`: historical raw-evidence inventory retained for provenance.
 
-Raw training logs and public datasets are not redistributed in the software
-repository. The raw experimental evidence is planned as a linked archival data
-record and is inventoried in `evidence/raw_evidence_manifest.csv`.
+This software release includes source code, frozen experimental protocols and
+configurations, compact manuscript results, and revision-round run-level
+analysis tables. Public benchmark datasets are retrieved from their original
+sources. Raw training logs and model checkpoints are generated when the
+documented experimental pipeline is run; they are not required to regenerate
+the aggregate analyses already distributed in this repository.
 
 ## Environment
 
